@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Video Review Tool</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 800px; margin: 30px auto; padding: 0 20px; }
+  h1 { text-align: center; }
+  #uploadSection { text-align: center; margin-bottom: 20px; }
+  #videoPlayer { width: 100%; max-height: 450px; background: #000; display: none; margin-bottom: 20px; }
+  #commentSection { display: none; }
+  #commentBox { width: 100%; height: 80px; padding: 10px; font-size: 14px; box-sizing: border-box; resize: vertical; }
+  button { padding: 8px 16px; cursor: pointer; margin-top: 8px; margin-right: 8px; border-radius: 4px; border: none; font-size: 14px; }
+  #addCommentBtn { background: #4a90d9; color: #fff; }
+  #reviewCompleteBtn { background: #2e7d32; color: #fff; }
+  #exportExcelBtn { background: #1e6f42; color: #fff; }
+  #commentList { margin-top: 20px; list-style: none; padding: 0; }
+  #commentList li { background: #f4f4f4; padding: 10px; margin-bottom: 8px; border-radius: 4px; border-left: 4px solid #4a90d9; }
+  .timestamp { font-size: 12px; color: #666; display: block; margin-top: 4px; }
+  #statusMsg { text-align: center; font-size: 13px; min-height: 18px; margin-top: 10px; }
+  #libStatus { text-align: center; font-size: 12px; color: #888; margin-bottom: 10px; }
+
+  /* --- Toggle & mic styles --- */
+  .modeToggle {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 10px;
+    background: #eee;
+    border-radius: 20px;
+    overflow: hidden;
+    width: 220px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .modeToggle button {
+    flex: 1;
+    margin: 0;
+    border-radius: 0;
+    background: transparent;
+    color: #333;
+    font-size: 13px;
+  }
+  .modeToggle button.active {
+    background: #4a90d9;
+    color: #fff;
+  }
+  #micBtn {
+    background: #d9534f;
+    color: #fff;
+    display: none;
+  }
+  #micBtn.recording {
+    background: #b52b27;
+    animation: pulse 1s infinite;
+  }
+  @keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
+  }
+  #micUnsupportedMsg {
+    font-size: 12px;
+    color: #b00;
+    text-align: center;
+    display: none;
+    margin-bottom: 8px;
+  }
+  #interimText {
+    font-style: italic;
+    color: #888;
+    font-size: 13px;
+    min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Video Review Tool</h1>
+<div id="libStatus">Checking libraries...</div>
+
+<div id="uploadSection">
+  <label for="videoUpload" style="cursor:pointer; padding:10px 20px; background:#4a90d9; color:#fff; border-radius:4px; display:inline-block;">
+    Upload Video
+  </label>
+  <input type="file" id="videoUpload" accept="video/*" style="display:none;">
+</div>
+
+<video id="videoPlayer" controls></video>
+
+<div id="commentSection">
+  <h3>Reviewer Comments</h3>
+
+  <div id="micUnsupportedMsg">
+    ⚠ Speech-to-text is not supported in this browser. Please use Chrome or Edge for voice input, or type your comment instead.
+  </div>
+
+  <div class="modeToggle">
+    <button id="typeModeBtn" class="active">⌨ Type</button>
+    <button id="voiceModeBtn">🎤 Voice</button>
+  </div>
+
+  <textarea id="commentBox" placeholder="Type your comment here... (video will pause automatically)"></textarea>
+  <div id="interimText"></div>
+
+  <br>
+  <button id="micBtn">🎙 Start Recording</button>
+  <button id="addCommentBtn">Add Comment</button>
+  <button id="reviewCompleteBtn">Review Complete (Generate PDF)</button>
+  <button id="exportExcelBtn">Export to Excel</button>
+  <ul id="commentList"></ul>
+</div>
+
+<div id="statusMsg"></div>
+
+<canvas id="hiddenCanvas" style="display:none;"></canvas>
+
+<!-- Local library references -->
+<script src="libs/jspdf.umd.min.js"></script>
+<script src="libs/xlsx.full.min.js"></script>
+
+<script>
+  const libStatus = document.getElementById('libStatus');
+  window.addEventListener('load', function() {
+    const jsPdfLoaded = typeof window.jspdf !== 'undefined';
+    const xlsxLoaded = typeof window.XLSX !== 'undefined';
+
+    if (jsPdfLoaded && xlsxLoaded) {
+      libStatus.textContent = '✔ Libraries loaded successfully (offline mode ready).';
+      libStatus.style.color = 'green';
+    } else {
+      libStatus.textContent = '⚠ Warning: ' +
+        (!jsPdfLoaded ? 'jspdf.umd.min.js not found in /libs folder. ' : '') +
+        (!xlsxLoaded ? 'xlsx.full.min.js not found in /libs folder.' : '');
+      libStatus.style.color = 'red';
+      console.error('Library load status:', { jsPdfLoaded, xlsxLoaded });
+    }
+  });
+
+  const videoUpload = document.getElementById('videoUpload');
+  const videoPlayer = document.getElementById('videoPlayer');
+  const commentSection = document.getElementById('commentSection');
+  const commentBox = document.getElementById('commentBox');
+  const addCommentBtn = document.getElementById('addCommentBtn');
+  const reviewCompleteBtn = document.getElementById('reviewCompleteBtn');
+  const exportExcelBtn = document.getElementById('exportExcelBtn');
+  const commentList = document.getElementById('commentList');
+  const hiddenCanvas = document.getElementById('hiddenCanvas');
+  const statusMsg = document.getElementById('statusMsg');
+
+  const typeModeBtn = document.getElementById('typeModeBtn');
+  const voiceModeBtn = document.getElementById('voiceModeBtn');
+  const micBtn = document.getElementById('micBtn');
+  const micUnsupportedMsg = document.getElementById('micUnsupportedMsg');
+  const interimText = document.getElementById('interimText');
+
+  let comments = [];
+  let videoFileName = 'video-review';
+  let sessionTimestamp = '';
+  let currentMode = 'type'; // 'type' or 'voice'
+  let recognition = null;
+  let isRecording = false;
+
+  function showStatus(msg, isError) {
+    statusMsg.textContent = msg;
+    statusMsg.style.color = isError ? '#b00' : '#2e7d32';
+  }
+
+  function getTimestampString() {
+    const now = new Date();
+    const pad = (n) => n.toString().padStart(2, '0');
+    return `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+  }
+
+  // ---------------- Speech Recognition Setup ----------------
+  const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const speechSupported = !!SpeechRecognitionAPI;
+
+  if (!speechSupported) {
+    voiceModeBtn.disabled = true;
+    voiceModeBtn.style.opacity = '0.5';
+    voiceModeBtn.title = 'Speech-to-text not supported in this browser';
+  } else {
+    recognition = new SpeechRecognitionAPI();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    let finalTranscript = '';
+
+    recognition.onstart = function() {
+      isRecording = true;
+      micBtn.textContent = '⏹ Stop Recording';
+      micBtn.classList.add('recording');
+      showStatus('Listening... speak your comment.', false);
+    };
+
+    recognition.onresult = function(event) {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript + ' ';
+        } else {
+          interim += transcript;
+        }
+      }
+      commentBox.value = (finalTranscript + interim).trim();
+      interimText.textContent = interim ? `(hearing: "${interim.trim()}")` : '';
+    };
+
+    recognition.onerror = function(event) {
+      console.error('Speech recognition error:', event.error);
+      showStatus('Speech recognition error: ' + event.error, true);
+      stopRecording();
+    };
+
+    recognition.onend = function() {
+      if (isRecording) {
+        // Restart automatically if user hasn't manually stopped (handles Chrome's auto-timeout)
+        try { recognition.start(); } catch (e) { /* already started, ignore */ }
+      }
+    };
+
+    function stopRecording() {
+      isRecording = false;
+      micBtn.textContent = '🎙 Start Recording';
+      micBtn.classList.remove('recording');
+      interimText.textContent = '';
+      try { recognition.stop(); } catch (e) {}
+    }
+
+    micBtn.addEventListener('click', function() {
+      if (!isRecording) {
+        finalTranscript = commentBox.value ? commentBox.value + ' ' : '';
+        if (videoPlayer.src && !videoPlayer.paused) videoPlayer.pause();
+        try {
+          recognition.start();
+        } catch (e) {
+          console.error('Could not start recognition:', e);
+          showStatus('Could not start microphone. Check browser permissions.', true);
+        }
+      } else {
+        stopRecording();
+        showStatus('Recording stopped.', false);
+      }
+    });
+  }
+
+  // ---------------- Mode Toggle (Type vs Voice) ----------------
+  function setMode(mode) {
+    currentMode = mode;
+    if (mode === 'type') {
+      typeModeBtn.classList.add('active');
+      voiceModeBtn.classList.remove('active');
+      micBtn.style.display = 'none';
+      commentBox.placeholder = 'Type your comment here... (video will pause automatically)';
+      if (isRecording) micBtn.click(); // stop any active recording
+    } else {
+      if (!speechSupported) {
+        micUnsupportedMsg.style.display = 'block';
+        return; // don't switch mode if unsupported
+      }
+      micUnsupportedMsg.style.display = 'none';
+      voiceModeBtn.classList.add('active');
+      typeModeBtn.classList.remove('active');
+      micBtn.style.display = 'inline-block';
+      commentBox.placeholder = 'Click "Start Recording" and speak your comment...';
+    }
+  }
+
+  typeModeBtn.addEventListener('click', () => setMode('type'));
+  voiceModeBtn.addEventListener('click', () => setMode('voice'));
+
+  // ---------------- Video Upload ----------------
+  videoUpload.addEventListener('change', function(e) {
+    try {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const url = URL.createObjectURL(file);
+      videoPlayer.src = url;
+      videoPlayer.style.display = 'block';
+      commentSection.style.display = 'block';
+      comments = [];
+      commentList.innerHTML = '';
+
+      videoFileName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-z0-9_\-]/gi, '_');
+      sessionTimestamp = getTimestampString();
+
+      showStatus(`Loaded video: ${file.name}`, false);
+    } catch (err) {
+      console.error('Video upload error:', err);
+      showStatus('Error loading video: ' + err.message, true);
+    }
+  });
+
+  // Pause on typing/focus (only relevant in type mode; voice mode pauses on mic start)
+  commentBox.addEventListener('focus', function() {
+    if (currentMode === 'type' && videoPlayer.src && !videoPlayer.paused) videoPlayer.pause();
+  });
+  commentBox.addEventListener('input', function() {
+    if (currentMode === 'type' && videoPlayer.src && !videoPlayer.paused) videoPlayer.pause();
+  });
+
+  function captureScreenshot() {
+    try {
+      if (!videoPlayer.videoWidth || !videoPlayer.videoHeight) return null;
+      hiddenCanvas.width = videoPlayer.videoWidth;
+      hiddenCanvas.height = videoPlayer.videoHeight;
+      const ctx = hiddenCanvas.getContext('2d');
+      ctx.drawImage(videoPlayer, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+      return hiddenCanvas.toDataURL('image/jpeg', 0.7);
+    } catch (err) {
+      console.error('Screenshot capture failed:', err);
+      return null;
+    }
+  }
+
+  function formatTime(t) {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  addCommentBtn.addEventListener('click', function() {
+    // Stop recording if active, so the final transcript is captured
+    if (isRecording) {
+      micBtn.click();
+    }
+
+    const text = commentBox.value.trim();
+    if (text === '') { showStatus('Please enter or record a comment before adding.', true); return; }
+    if (!videoPlayer.src) { showStatus('Please upload a video first.', true); return; }
+
+    const currentTime = videoPlayer.currentTime || 0;
+    const screenshot = captureScreenshot();
+
+    comments.push({ text, time: currentTime, screenshot });
+
+    const li = document.createElement('li');
+    li.innerHTML = `${escapeHtml(text)}<span class="timestamp">At ${formatTime(currentTime)}</span>`;
+    commentList.prepend(li);
+
+    commentBox.value = '';
+    showStatus(`Comment added at ${formatTime(currentTime)}.`, false);
+  });
+
+  reviewCompleteBtn.addEventListener('click', function() {
+    if (typeof window.jspdf === 'undefined') {
+      showStatus('PDF library not found. Make sure libs/jspdf.umd.min.js exists.', true);
+      return;
+    }
+    if (comments.length === 0) { showStatus('No comments to include in the review.', true); return; }
+
+    try {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF();
+      let y = 15;
+
+      doc.setFontSize(16);
+      doc.text('Video Review Report', 10, y); y += 10;
+      doc.setFontSize(10);
+      doc.text(`Video: ${videoFileName}`, 10, y); y += 6;
+      doc.text(`Generated: ${new Date().toLocaleString()}`, 10, y); y += 10;
+
+      comments.forEach((c, i) => {
+        if (y > 230) { doc.addPage(); y = 15; }
+        doc.setFontSize(12);
+        doc.text(`Comment ${i + 1} — Timestamp: ${formatTime(c.time)}`, 10, y); y += 7;
+        doc.setFontSize(10);
+        const splitText = doc.splitTextToSize(c.text, 180);
+        doc.text(splitText, 10, y);
+        y += splitText.length * 5 + 5;
+
+        if (c.screenshot) {
+          try {
+            doc.addImage(c.screenshot, 'JPEG', 10, y, 80, 45);
+            y += 50;
+          } catch (imgErr) { console.warn('Screenshot embed failed for comment', i, imgErr); }
+        }
+        y += 5;
+      });
+
+      doc.save(`${videoFileName}_${sessionTimestamp}.pdf`);
+      showStatus('PDF generated successfully.', false);
+    } catch (err) {
+      console.error('PDF generation error:', err);
+      showStatus('Error generating PDF: ' + err.message, true);
+    }
+  });
+
+  exportExcelBtn.addEventListener('click', function() {
+    if (typeof window.XLSX === 'undefined') {
+      showStatus('Excel library not found. Make sure libs/xlsx.full.min.js exists.', true);
+      return;
+    }
+    if (comments.length === 0) { showStatus('No comments to export.', true); return; }
+
+    try {
+      const data = comments.map((c, i) => ({
+        '#': i + 1,
+        'Timestamp': formatTime(c.time),
+        'Comment': c.text,
+        'Generated On': new Date().toLocaleString()
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(data);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Review Comments');
+      XLSX.writeFile(workbook, `${videoFileName}_${sessionTimestamp}.xlsx`);
+      showStatus('Excel file exported successfully.', false);
+    } catch (err) {
+      console.error('Excel export error:', err);
+      showStatus('Error exporting Excel: ' + err.message, true);
+    }
+  });
+</script>
+
+</body>
+</html>
